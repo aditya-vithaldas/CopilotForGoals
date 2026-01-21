@@ -1,0 +1,39 @@
+# Git
+.git
+.gitignore
+
+# Node modules (will be installed in container)
+node_modules
+frontend/node_modules
+backend/node_modules
+
+# Build outputs
+frontend/dist
+
+# Development files
+*.log
+npm-debug.log*
+.DS_Store
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files (use docker-compose env vars instead)
+.env
+.env.local
+.env.*.local
+
+# Database files (use volumes instead)
+*.db
+*.sqlite
+backend/*.db
+
+# Claude
+.claude
+
+# Test files
+coverage
+.nyc_output
