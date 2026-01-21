@@ -59,12 +59,6 @@ const connectionOptions: ConnectionOption[] = [
     description: 'Connect to a Confluence space',
     icon: <BookOpen className="w-6 h-6" />,
   },
-  {
-    type: 'whatsapp',
-    label: 'WhatsApp',
-    description: 'Connect to WhatsApp for messaging context',
-    icon: <MessageCircle className="w-6 h-6" />,
-  },
 ];
 
 export default function AddConnectionModal({ goalId, existingConnections = [], onClose, onAdd, onUseExisting }: AddConnectionModalProps) {

@@ -1,7 +1,8 @@
 import axios from 'axios';
 import type { Goal, Connection, ConnectionType, ConnectionConfig, FileItem, Suggestion } from '../types';
 
-const API_BASE = 'http://localhost:3001/api';
+// Use relative URL in production (same origin), localhost in development
+const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:3001/api';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -9,6 +10,27 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 });
+
+// Add auth token to all requests
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('authToken');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Handle 401 errors (redirect to login)
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('authToken');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
 
 // Goals API
 export const goalsApi = {
@@ -194,7 +216,7 @@ export interface Widget {
   id: string;
   goal_id: string;
   file_id?: string;
-  widget_type: 'summary' | 'key_points' | 'chart' | 'custom';
+  widget_type: 'summary' | 'key_points' | 'chart' | 'custom' | 'sprint_stats' | 'kanban_overview' | 'recent_tickets' | 'gantt_chart' | 'search_results' | 'label_emails' | 'inbox_summary' | 'unread_count' | 'recent_emails';
   title: string;
   content: string;
   config: Record<string, unknown>;
@@ -215,6 +237,11 @@ export const widgetsApi = {
 
   delete: async (id: string): Promise<void> => {
     await api.delete(`/widgets/${id}`);
+  },
+
+  update: async (id: string, updates: { config?: Record<string, unknown>; content?: string; title?: string }): Promise<Widget> => {
+    const { data } = await api.patch(`/widgets/${id}`, updates);
+    return data;
   },
 
   refresh: async (id: string): Promise<Widget> => {
@@ -367,5 +394,37 @@ export const gmailApi = {
   getLabels: async (connectionId: string): Promise<GmailLabel[]> => {
     const { data } = await api.get(`/connections/${connectionId}/gmail/labels`);
     return data;
+  },
+};
+
+// Todos API
+export interface Todo {
+  id: string;
+  goal_id: string;
+  text: string;
+  completed: number;
+  source?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const todosApi = {
+  getForGoal: async (goalId: string): Promise<Todo[]> => {
+    const { data } = await api.get(`/goals/${goalId}/todos`);
+    return data;
+  },
+
+  create: async (goalId: string, text: string, source?: string): Promise<Todo> => {
+    const { data } = await api.post(`/goals/${goalId}/todos`, { text, source });
+    return data;
+  },
+
+  toggle: async (id: string, completed?: boolean): Promise<Todo> => {
+    const { data } = await api.patch(`/todos/${id}`, { completed });
+    return data;
+  },
+
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/todos/${id}`);
   },
 };

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, Plus, Loader2, RefreshCw, Check, FileText, List } from 'lucide-react';
+import { ArrowLeft, Plus, Loader2, Check, FileText, List } from 'lucide-react';
 import { widgetsApi } from '../services/api';
 import ReactMarkdown from 'react-markdown';
 

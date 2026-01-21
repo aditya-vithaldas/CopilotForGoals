@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import {
   CheckCircle,
-  XCircle,
   AlertTriangle,
   Mail,
   LayoutGrid,
@@ -138,7 +137,7 @@ const getPriorityColor = (priority: string) => {
 };
 
 export default function RecommendedActionsSidebar({ show = true }: RecommendedActionsSidebarProps) {
-  const [actions, setActions] = useState<RecommendedAction[]>(sampleActions);
+  const [actions, _setActions] = useState<RecommendedAction[]>(sampleActions);
   const [acceptedActions, setAcceptedActions] = useState<Set<string>>(new Set());
   const [rejectedActions, setRejectedActions] = useState<Set<string>>(new Set());
 

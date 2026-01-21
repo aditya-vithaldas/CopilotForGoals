@@ -9,26 +9,50 @@ db.pragma('foreign_keys = ON');
 
 // Initialize schema
 db.exec(`
+  -- Users table
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT,
+    picture TEXT,
+    google_id TEXT UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_login DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- Sessions table
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   -- Goals table
   CREATE TABLE IF NOT EXISTS goals (
     id TEXT PRIMARY KEY,
+    user_id TEXT,
     name TEXT NOT NULL,
     description TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   -- Connections table
   CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
     goal_id TEXT NOT NULL,
-    type TEXT NOT NULL CHECK(type IN ('google_docs', 'google_drive', 'gmail', 'jira', 'mysql', 'confluence')),
+    user_id TEXT,
+    type TEXT NOT NULL CHECK(type IN ('google_docs', 'google_drive', 'gmail', 'jira', 'mysql', 'confluence', 'whatsapp')),
     name TEXT NOT NULL,
     config TEXT NOT NULL, -- JSON configuration
     status TEXT DEFAULT 'connected' CHECK(status IN ('connected', 'disconnected', 'error')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   -- Files/Content table (for individual files from Google Docs)
@@ -76,6 +100,18 @@ db.exec(`
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE SET NULL
+  );
+
+  -- Todos table
+  CREATE TABLE IF NOT EXISTS todos (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    completed INTEGER DEFAULT 0,
+    source TEXT, -- where this todo came from (e.g., widget title)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE
   );
 `);
 

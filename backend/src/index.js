@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('./database');
 const gemini = require('./gemini');
@@ -31,21 +32,199 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
-app.use(cors());
+const isProduction = process.env.NODE_ENV === 'production';
+
+// URLs for OAuth redirects
+const FRONTEND_URL = isProduction
+  ? 'https://app.decisionos.me'
+  : 'http://localhost:5173';
+const BACKEND_URL = isProduction
+  ? 'https://app.decisionos.me'
+  : 'http://localhost:3001';
+
+app.use(cors({
+  origin: isProduction ? true : 'http://localhost:5173',
+  credentials: true
+}));
 app.use(express.json());
+
+// Serve static files in production
+if (isProduction) {
+  app.use(express.static(path.join(__dirname, '..', 'public')));
+}
+
+// ============== AUTH MIDDLEWARE ==============
+
+// Helper to get user from session token
+const getUserFromSession = (req) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+
+  const sessionId = authHeader.substring(7);
+  const session = db.prepare(`
+    SELECT s.*, u.id as user_id, u.email, u.name, u.picture
+    FROM sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.id = ? AND s.expires_at > datetime('now')
+  `).get(sessionId);
+
+  if (!session) {
+    return null;
+  }
+
+  return {
+    id: session.user_id,
+    email: session.email,
+    name: session.name,
+    picture: session.picture
+  };
+};
+
+// Auth middleware - optional auth (allows unauthenticated for backwards compatibility)
+const optionalAuth = (req, res, next) => {
+  req.user = getUserFromSession(req);
+  next();
+};
+
+// Auth middleware - required auth
+const requireAuth = (req, res, next) => {
+  req.user = getUserFromSession(req);
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  next();
+};
+
+// Helper to check if user owns a goal
+const checkGoalOwnership = (goalId, user) => {
+  const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(goalId);
+  if (!goal) return { error: 'Goal not found', status: 404 };
+  // If goal has user_id, only that user can access
+  if (goal.user_id && (!user || user.id !== goal.user_id)) {
+    return { error: 'Access denied', status: 403 };
+  }
+  return { goal };
+};
+
+// Helper to check if user owns a connection (via its goal)
+const checkConnectionOwnership = (connectionId, user) => {
+  const conn = db.prepare('SELECT c.*, g.user_id FROM connections c JOIN goals g ON c.goal_id = g.id WHERE c.id = ?').get(connectionId);
+  if (!conn) return { error: 'Connection not found', status: 404 };
+  if (conn.user_id && (!user || user.id !== conn.user_id)) {
+    return { error: 'Access denied', status: 403 };
+  }
+  return { connection: conn };
+};
+
+// ============== AUTH API ==============
+
+// Get current user
+app.get('/api/auth/me', (req, res) => {
+  const user = getUserFromSession(req);
+  if (!user) {
+    return res.json({ user: null });
+  }
+  res.json({ user });
+});
+
+// Google Sign-In - get auth URL for login
+app.get('/api/auth/login/google', (req, res) => {
+  try {
+    const state = JSON.stringify({ type: 'login' });
+    // Use a special login redirect URI
+    const loginRedirectUri = `${BACKEND_URL}/api/auth/google/callback/login`;
+    const authUrl = googleAuth.getAuthUrl({ state }, loginRedirectUri);
+    res.json({ authUrl });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Google Sign-In callback
+app.get('/api/auth/google/callback/login', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    // Get tokens from Google (must use same redirect URI as getAuthUrl)
+    const loginRedirectUri = `${BACKEND_URL}/api/auth/google/callback/login`;
+    const tokens = await googleAuth.getTokens(code, loginRedirectUri);
+
+    // Get user info
+    const userInfo = await googleAuth.getUserInfo(tokens);
+
+    // Find or create user
+    let user = db.prepare('SELECT * FROM users WHERE google_id = ? OR email = ?')
+      .get(userInfo.id, userInfo.email);
+
+    if (!user) {
+      // Create new user
+      const userId = uuidv4();
+      db.prepare(`
+        INSERT INTO users (id, email, name, picture, google_id)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(userId, userInfo.email, userInfo.name, userInfo.picture, userInfo.id);
+      user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    } else {
+      // Update last login and profile info
+      db.prepare(`
+        UPDATE users SET last_login = CURRENT_TIMESTAMP, name = ?, picture = ?, google_id = ?
+        WHERE id = ?
+      `).run(userInfo.name, userInfo.picture, userInfo.id, user.id);
+    }
+
+    // Create session (expires in 7 days)
+    const sessionId = uuidv4();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(`
+      INSERT INTO sessions (id, user_id, expires_at)
+      VALUES (?, ?, ?)
+    `).run(sessionId, user.id, expiresAt);
+
+    // Redirect back to frontend with session token
+    res.redirect(`${FRONTEND_URL}/auth/callback?token=${sessionId}`);
+  } catch (error) {
+    console.error('Login callback error:', error);
+    res.redirect(`${FRONTEND_URL}/auth/callback?error=${encodeURIComponent(error.message)}`);
+  }
+});
+
+// Logout
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const sessionId = authHeader.substring(7);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  }
+  res.json({ success: true });
+});
 
 // ============== GOALS API ==============
 
-// Get all goals
-app.get('/api/goals', (req, res) => {
+// Get all goals (filtered by user if authenticated)
+app.get('/api/goals', optionalAuth, (req, res) => {
   try {
-    const goals = db.prepare(`
-      SELECT g.*,
-        (SELECT COUNT(*) FROM connections WHERE goal_id = g.id) as connection_count,
-        (SELECT COUNT(*) FROM files WHERE goal_id = g.id) as file_count
-      FROM goals g
-      ORDER BY g.updated_at DESC
-    `).all();
+    let goals;
+    if (req.user) {
+      goals = db.prepare(`
+        SELECT g.*,
+          (SELECT COUNT(*) FROM connections WHERE goal_id = g.id) as connection_count,
+          (SELECT COUNT(*) FROM files WHERE goal_id = g.id) as file_count
+        FROM goals g
+        WHERE g.user_id = ? OR g.user_id IS NULL
+        ORDER BY g.updated_at DESC
+      `).all(req.user.id);
+    } else {
+      goals = db.prepare(`
+        SELECT g.*,
+          (SELECT COUNT(*) FROM connections WHERE goal_id = g.id) as connection_count,
+          (SELECT COUNT(*) FROM files WHERE goal_id = g.id) as file_count
+        FROM goals g
+        WHERE g.user_id IS NULL
+        ORDER BY g.updated_at DESC
+      `).all();
+    }
     res.json(goals);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -53,11 +232,16 @@ app.get('/api/goals', (req, res) => {
 });
 
 // Get single goal with connections
-app.get('/api/goals/:id', (req, res) => {
+app.get('/api/goals/:id', optionalAuth, (req, res) => {
   try {
     const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(req.params.id);
     if (!goal) {
       return res.status(404).json({ error: 'Goal not found' });
+    }
+
+    // Check ownership: if goal has a user_id, only that user can access it
+    if (goal.user_id && (!req.user || req.user.id !== goal.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     const connections = db.prepare('SELECT * FROM connections WHERE goal_id = ?').all(req.params.id);
@@ -76,12 +260,13 @@ app.get('/api/goals/:id', (req, res) => {
 });
 
 // Create goal
-app.post('/api/goals', (req, res) => {
+app.post('/api/goals', optionalAuth, (req, res) => {
   try {
     const { name, description } = req.body;
     const id = uuidv4();
+    const userId = req.user?.id || null;
 
-    db.prepare('INSERT INTO goals (id, name, description) VALUES (?, ?, ?)').run(id, name, description || '');
+    db.prepare('INSERT INTO goals (id, name, description, user_id) VALUES (?, ?, ?, ?)').run(id, name, description || '', userId);
 
     const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
     res.status(201).json(goal);
@@ -91,8 +276,11 @@ app.post('/api/goals', (req, res) => {
 });
 
 // Update goal
-app.put('/api/goals/:id', (req, res) => {
+app.put('/api/goals/:id', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { name, description } = req.body;
 
     db.prepare('UPDATE goals SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
@@ -106,8 +294,11 @@ app.put('/api/goals/:id', (req, res) => {
 });
 
 // Delete goal
-app.delete('/api/goals/:id', (req, res) => {
+app.delete('/api/goals/:id', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     db.prepare('DELETE FROM goals WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -118,8 +309,11 @@ app.delete('/api/goals/:id', (req, res) => {
 // ============== CONNECTIONS API ==============
 
 // Get connections for a goal
-app.get('/api/goals/:goalId/connections', (req, res) => {
+app.get('/api/goals/:goalId/connections', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const connections = db.prepare('SELECT * FROM connections WHERE goal_id = ?').all(req.params.goalId);
     res.json(connections.map(c => ({ ...c, config: JSON.parse(c.config || '{}') })));
   } catch (error) {
@@ -128,8 +322,11 @@ app.get('/api/goals/:goalId/connections', (req, res) => {
 });
 
 // Add connection
-app.post('/api/goals/:goalId/connections', (req, res) => {
+app.post('/api/goals/:goalId/connections', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { type, name, config } = req.body;
     const id = uuidv4();
 
@@ -147,8 +344,11 @@ app.post('/api/goals/:goalId/connections', (req, res) => {
 });
 
 // Update connection
-app.put('/api/connections/:id', (req, res) => {
+app.put('/api/connections/:id', optionalAuth, (req, res) => {
   try {
+    const check = checkConnectionOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { name, config, status } = req.body;
 
     db.prepare('UPDATE connections SET name = ?, config = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
@@ -162,8 +362,11 @@ app.put('/api/connections/:id', (req, res) => {
 });
 
 // Delete connection
-app.delete('/api/connections/:id', (req, res) => {
+app.delete('/api/connections/:id', optionalAuth, (req, res) => {
   try {
+    const check = checkConnectionOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     db.prepare('DELETE FROM connections WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -174,19 +377,16 @@ app.delete('/api/connections/:id', (req, res) => {
 // ============== FILES API ==============
 
 // Add file to connection
-app.post('/api/connections/:connectionId/files', (req, res) => {
+app.post('/api/connections/:connectionId/files', optionalAuth, (req, res) => {
   try {
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { name, file_type, external_id, content, metadata } = req.body;
     const id = uuidv4();
 
-    // Get goal_id from connection
-    const connection = db.prepare('SELECT goal_id FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
-
     db.prepare('INSERT INTO files (id, connection_id, goal_id, name, file_type, external_id, content, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, req.params.connectionId, connection.goal_id, name, file_type || '', external_id || '', content || '', JSON.stringify(metadata || {}));
+      .run(id, req.params.connectionId, check.connection.goal_id, name, file_type || '', external_id || '', content || '', JSON.stringify(metadata || {}));
 
     const file = db.prepare('SELECT * FROM files WHERE id = ?').get(id);
     res.status(201).json({ ...file, metadata: JSON.parse(file.metadata || '{}') });
@@ -196,8 +396,11 @@ app.post('/api/connections/:connectionId/files', (req, res) => {
 });
 
 // Get files for a connection
-app.get('/api/connections/:connectionId/files', (req, res) => {
+app.get('/api/connections/:connectionId/files', optionalAuth, (req, res) => {
   try {
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const files = db.prepare('SELECT * FROM files WHERE connection_id = ?').all(req.params.connectionId);
     res.json(files.map(f => ({ ...f, metadata: JSON.parse(f.metadata || '{}') })));
   } catch (error) {
@@ -206,8 +409,15 @@ app.get('/api/connections/:connectionId/files', (req, res) => {
 });
 
 // Delete file
-app.delete('/api/files/:id', (req, res) => {
+app.delete('/api/files/:id', optionalAuth, (req, res) => {
   try {
+    // Check ownership via file's goal
+    const file = db.prepare('SELECT f.*, g.user_id FROM files f JOIN goals g ON f.goal_id = g.id WHERE f.id = ?').get(req.params.id);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+    if (file.user_id && (!req.user || req.user.id !== file.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
     db.prepare('DELETE FROM files WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -218,8 +428,11 @@ app.delete('/api/files/:id', (req, res) => {
 // ============== SUGGESTIONS API ==============
 
 // Add suggestion
-app.post('/api/goals/:goalId/suggestions', (req, res) => {
+app.post('/api/goals/:goalId/suggestions', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { connection_id, file_id, title, description, action_type, action_config } = req.body;
     const id = uuidv4();
 
@@ -234,8 +447,11 @@ app.post('/api/goals/:goalId/suggestions', (req, res) => {
 });
 
 // Get suggestions for a goal
-app.get('/api/goals/:goalId/suggestions', (req, res) => {
+app.get('/api/goals/:goalId/suggestions', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const suggestions = db.prepare('SELECT * FROM suggestions WHERE goal_id = ?').all(req.params.goalId);
     res.json(suggestions.map(s => ({ ...s, action_config: JSON.parse(s.action_config || '{}') })));
   } catch (error) {
@@ -244,8 +460,15 @@ app.get('/api/goals/:goalId/suggestions', (req, res) => {
 });
 
 // Delete suggestion
-app.delete('/api/suggestions/:id', (req, res) => {
+app.delete('/api/suggestions/:id', optionalAuth, (req, res) => {
   try {
+    // Check ownership via suggestion's goal
+    const suggestion = db.prepare('SELECT s.*, g.user_id FROM suggestions s JOIN goals g ON s.goal_id = g.id WHERE s.id = ?').get(req.params.id);
+    if (!suggestion) return res.status(404).json({ error: 'Suggestion not found' });
+    if (suggestion.user_id && (!req.user || req.user.id !== suggestion.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
     db.prepare('DELETE FROM suggestions WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -256,12 +479,11 @@ app.delete('/api/suggestions/:id', (req, res) => {
 // ============== GENERATE SUGGESTIONS ==============
 
 // Generate suggestions based on connection type and content
-app.post('/api/goals/:goalId/generate-suggestions', (req, res) => {
+app.post('/api/goals/:goalId/generate-suggestions', optionalAuth, (req, res) => {
   try {
-    const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(req.params.goalId);
-    if (!goal) {
-      return res.status(404).json({ error: 'Goal not found' });
-    }
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+    const goal = check.goal;
 
     const connections = db.prepare('SELECT * FROM connections WHERE goal_id = ?').all(req.params.goalId);
     const files = db.prepare('SELECT * FROM files WHERE goal_id = ?').all(req.params.goalId);
@@ -644,24 +866,22 @@ app.get('/api/auth/google/callback', async (req, res) => {
     db.prepare('UPDATE goals SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(goalId);
 
     // Redirect back to frontend
-    res.redirect(`http://localhost:5174/goals/${goalId}?connected=${connectionType}`);
+    res.redirect(`${FRONTEND_URL}/goals/${goalId}?connected=${connectionType}`);
   } catch (error) {
     console.error('Google OAuth error:', error);
-    res.redirect(`http://localhost:5174/goals/${req.query.state ? JSON.parse(req.query.state).goalId : ''}?error=auth_failed`);
+    res.redirect(`${FRONTEND_URL}/goals/${req.query.state ? JSON.parse(req.query.state).goalId : ''}?error=auth_failed`);
   }
 });
 
 // ============== GOOGLE DRIVE API ==============
 
 // List files in Drive
-app.get('/api/connections/:connectionId/drive/files', async (req, res) => {
+app.get('/api/connections/:connectionId/drive/files', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
     const { folderId } = req.query;
 
     const tokens = {
@@ -678,14 +898,12 @@ app.get('/api/connections/:connectionId/drive/files', async (req, res) => {
 });
 
 // List folders for picker
-app.get('/api/connections/:connectionId/drive/folders', async (req, res) => {
+app.get('/api/connections/:connectionId/drive/folders', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
     const { parentId } = req.query;
 
     const tokens = {
@@ -702,14 +920,12 @@ app.get('/api/connections/:connectionId/drive/folders', async (req, res) => {
 });
 
 // Search files
-app.get('/api/connections/:connectionId/drive/search', async (req, res) => {
+app.get('/api/connections/:connectionId/drive/search', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
     const { query, folderId } = req.query;
 
     const tokens = {
@@ -726,15 +942,13 @@ app.get('/api/connections/:connectionId/drive/search', async (req, res) => {
 });
 
 // Set folder for connection
-app.put('/api/connections/:connectionId/drive/folder', async (req, res) => {
+app.put('/api/connections/:connectionId/drive/folder', optionalAuth, async (req, res) => {
   try {
-    const { folderId, folderName } = req.body;
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const { folderId, folderName } = req.body;
+    const config = JSON.parse(check.connection.config || '{}');
     config.folderId = folderId;
     config.folderName = folderName;
 
@@ -751,14 +965,12 @@ app.put('/api/connections/:connectionId/drive/folder', async (req, res) => {
 // ============== GOOGLE DOCS API ==============
 
 // Get document content
-app.get('/api/connections/:connectionId/docs/:documentId', async (req, res) => {
+app.get('/api/connections/:connectionId/docs/:documentId', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
     const tokens = {
       access_token: config.accessToken,
       refresh_token: config.refreshToken,
@@ -773,15 +985,13 @@ app.get('/api/connections/:connectionId/docs/:documentId', async (req, res) => {
 });
 
 // Import file to goal
-app.post('/api/connections/:connectionId/import', async (req, res) => {
+app.post('/api/connections/:connectionId/import', optionalAuth, async (req, res) => {
   try {
-    const { fileId, fileName, mimeType } = req.body;
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const { fileId, fileName, mimeType } = req.body;
+    const config = JSON.parse(check.connection.config || '{}');
     const tokens = {
       access_token: config.accessToken,
       refresh_token: config.refreshToken,
@@ -804,7 +1014,7 @@ app.post('/api/connections/:connectionId/import', async (req, res) => {
     // Save to files table
     const id = uuidv4();
     db.prepare('INSERT INTO files (id, connection_id, goal_id, name, file_type, external_id, content, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, connection.id, connection.goal_id, fileName, fileType, fileId, content, JSON.stringify({ mimeType }));
+      .run(id, check.connection.id, check.connection.goal_id, fileName, fileType, fileId, content, JSON.stringify({ mimeType }));
 
     const file = db.prepare('SELECT * FROM files WHERE id = ?').get(id);
     res.status(201).json({ ...file, metadata: JSON.parse(file.metadata || '{}') });
@@ -817,14 +1027,12 @@ app.post('/api/connections/:connectionId/import', async (req, res) => {
 // ============== GMAIL API ==============
 
 // List emails
-app.get('/api/connections/:connectionId/gmail/messages', async (req, res) => {
+app.get('/api/connections/:connectionId/gmail/messages', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
     const { query, maxResults } = req.query;
 
     const tokens = {
@@ -848,14 +1056,12 @@ app.get('/api/connections/:connectionId/gmail/messages', async (req, res) => {
 });
 
 // Get single email
-app.get('/api/connections/:connectionId/gmail/messages/:messageId', async (req, res) => {
+app.get('/api/connections/:connectionId/gmail/messages/:messageId', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
 
     const tokens = {
       access_token: config.accessToken,
@@ -871,14 +1077,12 @@ app.get('/api/connections/:connectionId/gmail/messages/:messageId', async (req, 
 });
 
 // Search emails
-app.get('/api/connections/:connectionId/gmail/search', async (req, res) => {
+app.get('/api/connections/:connectionId/gmail/search', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
     const { query, maxResults } = req.query;
 
     const tokens = {
@@ -895,14 +1099,12 @@ app.get('/api/connections/:connectionId/gmail/search', async (req, res) => {
 });
 
 // Get Gmail labels
-app.get('/api/connections/:connectionId/gmail/labels', async (req, res) => {
+app.get('/api/connections/:connectionId/gmail/labels', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const config = JSON.parse(check.connection.config || '{}');
 
     const tokens = {
       access_token: config.accessToken,
@@ -942,13 +1144,12 @@ app.post('/api/jira/boards', async (req, res) => {
 });
 
 // Get board issues (Kanban view)
-app.get('/api/connections/:connectionId/jira/issues', async (req, res) => {
+app.get('/api/connections/:connectionId/jira/issues', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
-    const config = JSON.parse(connection.config || '{}');
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const config = JSON.parse(check.connection.config || '{}');
     const issues = await jira.getBoardIssues(config.jiraUrl, config.email, config.apiToken, config.boardId);
     res.json(issues);
   } catch (error) {
@@ -957,13 +1158,12 @@ app.get('/api/connections/:connectionId/jira/issues', async (req, res) => {
 });
 
 // Get board configuration (columns)
-app.get('/api/connections/:connectionId/jira/config', async (req, res) => {
+app.get('/api/connections/:connectionId/jira/config', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
-    const config = JSON.parse(connection.config || '{}');
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const config = JSON.parse(check.connection.config || '{}');
     const boardConfig = await jira.getBoardConfiguration(config.jiraUrl, config.email, config.apiToken, config.boardId);
     res.json(boardConfig);
   } catch (error) {
@@ -972,13 +1172,12 @@ app.get('/api/connections/:connectionId/jira/config', async (req, res) => {
 });
 
 // Get active sprint
-app.get('/api/connections/:connectionId/jira/sprint', async (req, res) => {
+app.get('/api/connections/:connectionId/jira/sprint', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
-    const config = JSON.parse(connection.config || '{}');
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const config = JSON.parse(check.connection.config || '{}');
     const sprint = await jira.getActiveSprint(config.jiraUrl, config.email, config.apiToken, config.boardId);
     if (sprint) {
       const issues = await jira.getSprintIssues(config.jiraUrl, config.email, config.apiToken, sprint.id);
@@ -992,13 +1191,12 @@ app.get('/api/connections/:connectionId/jira/sprint', async (req, res) => {
 });
 
 // Get epics/roadmap
-app.get('/api/connections/:connectionId/jira/epics', async (req, res) => {
+app.get('/api/connections/:connectionId/jira/epics', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
-    const config = JSON.parse(connection.config || '{}');
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const config = JSON.parse(check.connection.config || '{}');
     const epics = await jira.getEpics(config.jiraUrl, config.email, config.apiToken, config.boardId);
     res.json(epics);
   } catch (error) {
@@ -1007,13 +1205,12 @@ app.get('/api/connections/:connectionId/jira/epics', async (req, res) => {
 });
 
 // Get recent tickets
-app.get('/api/connections/:connectionId/jira/recent', async (req, res) => {
+app.get('/api/connections/:connectionId/jira/recent', optionalAuth, async (req, res) => {
   try {
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
-    const config = JSON.parse(connection.config || '{}');
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const config = JSON.parse(check.connection.config || '{}');
     const tickets = await jira.getRecentTickets(config.jiraUrl, config.email, config.apiToken, config.boardId, 4);
     res.json(tickets);
   } catch (error) {
@@ -1022,15 +1219,13 @@ app.get('/api/connections/:connectionId/jira/recent', async (req, res) => {
 });
 
 // Set board for Jira connection
-app.put('/api/connections/:connectionId/jira/board', async (req, res) => {
+app.put('/api/connections/:connectionId/jira/board', optionalAuth, async (req, res) => {
   try {
-    const { boardId, boardName, boardType } = req.body;
-    const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(req.params.connectionId);
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' });
-    }
+    const check = checkConnectionOwnership(req.params.connectionId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
 
-    const config = JSON.parse(connection.config || '{}');
+    const { boardId, boardName, boardType } = req.body;
+    const config = JSON.parse(check.connection.config || '{}');
     config.boardId = boardId;
     config.boardName = boardName;
     config.boardType = boardType;
@@ -1066,16 +1261,14 @@ app.post('/api/chat/config', (req, res) => {
 });
 
 // Chat with goal context
-app.post('/api/goals/:goalId/chat', async (req, res) => {
+app.post('/api/goals/:goalId/chat', optionalAuth, async (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { message, history } = req.body;
     const goalId = req.params.goalId;
-
-    // Get goal data
-    const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(goalId);
-    if (!goal) {
-      return res.status(404).json({ error: 'Goal not found' });
-    }
+    const goal = check.goal;
 
     // Get connections
     const connections = db.prepare('SELECT * FROM connections WHERE goal_id = ?').all(goalId);
@@ -1141,11 +1334,13 @@ app.post('/api/goals/:goalId/chat', async (req, res) => {
 });
 
 // Summarize a file
-app.post('/api/files/:fileId/summarize', async (req, res) => {
+app.post('/api/files/:fileId/summarize', optionalAuth, async (req, res) => {
   try {
-    const file = db.prepare('SELECT * FROM files WHERE id = ?').get(req.params.fileId);
-    if (!file) {
-      return res.status(404).json({ error: 'File not found' });
+    // Check ownership via file's goal
+    const file = db.prepare('SELECT f.*, g.user_id FROM files f JOIN goals g ON f.goal_id = g.id WHERE f.id = ?').get(req.params.fileId);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+    if (file.user_id && (!req.user || req.user.id !== file.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     if (!file.content) {
@@ -1161,18 +1356,32 @@ app.post('/api/files/:fileId/summarize', async (req, res) => {
 });
 
 // Extract key points from a file
-app.post('/api/files/:fileId/extract-points', async (req, res) => {
+app.post('/api/files/:fileId/extract-points', optionalAuth, async (req, res) => {
   try {
-    const file = db.prepare('SELECT * FROM files WHERE id = ?').get(req.params.fileId);
-    if (!file) {
-      return res.status(404).json({ error: 'File not found' });
+    // Check ownership via file's goal
+    const file = db.prepare('SELECT f.*, g.user_id FROM files f JOIN goals g ON f.goal_id = g.id WHERE f.id = ?').get(req.params.fileId);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+    if (file.user_id && (!req.user || req.user.id !== file.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     if (!file.content) {
       return res.status(400).json({ error: 'File has no content to analyze' });
     }
 
-    const prompt = `Extract key points, action items, and important information from the following document. Format as a bulleted list:\n\n${file.content}`;
+    const prompt = `Extract from this document very briefly:
+
+**Key Points:**
+• [one short point under 10 words]
+• [one short point under 10 words]
+
+**Action Items:**
+• [short action under 10 words]
+• [short action under 10 words]
+• [short action under 10 words]
+
+Document:
+${file.content}`;
     const result = await gemini.chatWithContext(prompt, '', []);
     res.json({ points: result, file: { id: file.id, name: file.name, goal_id: file.goal_id } });
   } catch (error) {
@@ -1183,9 +1392,22 @@ app.post('/api/files/:fileId/extract-points', async (req, res) => {
 
 // ============== WIDGETS API ==============
 
+// Helper to check widget ownership
+const checkWidgetOwnership = (widgetId, user) => {
+  const widget = db.prepare('SELECT w.*, g.user_id FROM widgets w JOIN goals g ON w.goal_id = g.id WHERE w.id = ?').get(widgetId);
+  if (!widget) return { error: 'Widget not found', status: 404 };
+  if (widget.user_id && (!user || user.id !== widget.user_id)) {
+    return { error: 'Access denied', status: 403 };
+  }
+  return { widget };
+};
+
 // Get widgets for a goal
-app.get('/api/goals/:goalId/widgets', (req, res) => {
+app.get('/api/goals/:goalId/widgets', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const widgets = db.prepare('SELECT * FROM widgets WHERE goal_id = ? ORDER BY position ASC, created_at DESC').all(req.params.goalId);
     res.json(widgets.map(w => ({ ...w, config: JSON.parse(w.config || '{}') })));
   } catch (error) {
@@ -1194,8 +1416,11 @@ app.get('/api/goals/:goalId/widgets', (req, res) => {
 });
 
 // Create a widget
-app.post('/api/goals/:goalId/widgets', (req, res) => {
+app.post('/api/goals/:goalId/widgets', optionalAuth, (req, res) => {
   try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { file_id, widget_type, title, content, config } = req.body;
     const id = uuidv4();
 
@@ -1210,8 +1435,11 @@ app.post('/api/goals/:goalId/widgets', (req, res) => {
 });
 
 // Update a widget (refresh content)
-app.put('/api/widgets/:id', (req, res) => {
+app.put('/api/widgets/:id', optionalAuth, (req, res) => {
   try {
+    const check = checkWidgetOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     const { content } = req.body;
 
     db.prepare('UPDATE widgets SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
@@ -1225,8 +1453,11 @@ app.put('/api/widgets/:id', (req, res) => {
 });
 
 // Delete a widget
-app.delete('/api/widgets/:id', (req, res) => {
+app.delete('/api/widgets/:id', optionalAuth, (req, res) => {
   try {
+    const check = checkWidgetOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
     db.prepare('DELETE FROM widgets WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -1234,13 +1465,67 @@ app.delete('/api/widgets/:id', (req, res) => {
   }
 });
 
+// Update a widget (for action item status changes, etc.)
+app.patch('/api/widgets/:id', optionalAuth, (req, res) => {
+  try {
+    const check = checkWidgetOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const { config, content, title } = req.body;
+    const widget = check.widget;
+
+    // Merge config if provided
+    let newConfig = widget.config ? JSON.parse(widget.config) : {};
+    if (config) {
+      newConfig = { ...newConfig, ...config };
+    }
+
+    const updates = [];
+    const values = [];
+
+    if (config) {
+      updates.push('config = ?');
+      values.push(JSON.stringify(newConfig));
+    }
+    if (content !== undefined) {
+      updates.push('content = ?');
+      values.push(content);
+    }
+    if (title !== undefined) {
+      updates.push('title = ?');
+      values.push(title);
+    }
+
+    if (updates.length > 0) {
+      updates.push('updated_at = CURRENT_TIMESTAMP');
+      values.push(req.params.id);
+      db.prepare(`UPDATE widgets SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    }
+
+    const updatedWidget = db.prepare('SELECT * FROM widgets WHERE id = ?').get(req.params.id);
+    res.json({
+      ...updatedWidget,
+      config: updatedWidget.config ? JSON.parse(updatedWidget.config) : {}
+    });
+  } catch (error) {
+    console.error('Widget update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Reorder widgets
-app.post('/api/widgets/reorder', (req, res) => {
+app.post('/api/widgets/reorder', optionalAuth, (req, res) => {
   try {
     const { positions } = req.body;
 
     if (!positions || !Array.isArray(positions)) {
       return res.status(400).json({ error: 'positions array is required' });
+    }
+
+    // Check ownership of all widgets being reordered
+    for (const { id } of positions) {
+      const check = checkWidgetOwnership(id, req.user);
+      if (check.error) return res.status(check.status).json({ error: check.error });
     }
 
     const updateStmt = db.prepare('UPDATE widgets SET position = ? WHERE id = ?');
@@ -1259,12 +1544,12 @@ app.post('/api/widgets/reorder', (req, res) => {
 });
 
 // Refresh a widget's content
-app.post('/api/widgets/:id/refresh', async (req, res) => {
+app.post('/api/widgets/:id/refresh', optionalAuth, async (req, res) => {
   try {
-    const widget = db.prepare('SELECT * FROM widgets WHERE id = ?').get(req.params.id);
-    if (!widget) {
-      return res.status(404).json({ error: 'Widget not found' });
-    }
+    const check = checkWidgetOwnership(req.params.id, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const widget = check.widget;
 
     if (!widget.file_id) {
       return res.status(400).json({ error: 'Widget has no associated file' });
@@ -1279,7 +1564,19 @@ app.post('/api/widgets/:id/refresh', async (req, res) => {
     if (widget.widget_type === 'summary') {
       newContent = await gemini.summarizeContent(file.content, file.file_type);
     } else if (widget.widget_type === 'key_points') {
-      const prompt = `Extract key points, action items, and important information from the following document. Format as a bulleted list:\n\n${file.content}`;
+      const prompt = `Extract from this document very briefly:
+
+**Key Points:**
+• [one short point under 10 words]
+• [one short point under 10 words]
+
+**Action Items:**
+• [short action under 10 words]
+• [short action under 10 words]
+• [short action under 10 words]
+
+Document:
+${file.content}`;
       newContent = await gemini.chatWithContext(prompt, '', []);
     } else {
       return res.status(400).json({ error: 'Cannot refresh this widget type' });
@@ -1295,6 +1592,83 @@ app.post('/api/widgets/:id/refresh', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============== TODOS API ==============
+
+// Get todos for a goal
+app.get('/api/goals/:goalId/todos', optionalAuth, (req, res) => {
+  try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const todos = db.prepare('SELECT * FROM todos WHERE goal_id = ? ORDER BY created_at DESC').all(req.params.goalId);
+    res.json(todos);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a todo
+app.post('/api/goals/:goalId/todos', optionalAuth, (req, res) => {
+  try {
+    const check = checkGoalOwnership(req.params.goalId, req.user);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    const { text, source } = req.body;
+    if (!text) return res.status(400).json({ error: 'Text is required' });
+
+    const id = uuidv4();
+    db.prepare('INSERT INTO todos (id, goal_id, text, source) VALUES (?, ?, ?, ?)')
+      .run(id, req.params.goalId, text, source || null);
+
+    const todo = db.prepare('SELECT * FROM todos WHERE id = ?').get(id);
+    res.status(201).json(todo);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Toggle todo completed status
+app.patch('/api/todos/:id', optionalAuth, (req, res) => {
+  try {
+    const todo = db.prepare('SELECT t.*, g.user_id FROM todos t JOIN goals g ON t.goal_id = g.id WHERE t.id = ?').get(req.params.id);
+    if (!todo) return res.status(404).json({ error: 'Todo not found' });
+    if (todo.user_id && (!req.user || req.user.id !== todo.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const completed = req.body.completed !== undefined ? (req.body.completed ? 1 : 0) : (todo.completed ? 0 : 1);
+    db.prepare('UPDATE todos SET completed = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(completed, req.params.id);
+
+    const updated = db.prepare('SELECT * FROM todos WHERE id = ?').get(req.params.id);
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete a todo
+app.delete('/api/todos/:id', optionalAuth, (req, res) => {
+  try {
+    const todo = db.prepare('SELECT t.*, g.user_id FROM todos t JOIN goals g ON t.goal_id = g.id WHERE t.id = ?').get(req.params.id);
+    if (!todo) return res.status(404).json({ error: 'Todo not found' });
+    if (todo.user_id && (!req.user || req.user.id !== todo.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    db.prepare('DELETE FROM todos WHERE id = ?').run(req.params.id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// SPA fallback - serve index.html for all non-API routes in production
+if (isProduction) {
+  app.get('/{*path}', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);

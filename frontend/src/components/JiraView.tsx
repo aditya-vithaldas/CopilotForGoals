@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { LayoutGrid, Calendar, List, Clock, User, Loader2, PlusCircle, Check, GanttChart } from 'lucide-react';
+import { LayoutGrid, Calendar, List, Clock, User, Loader2, PlusCircle, Check } from 'lucide-react';
 import type { Connection } from '../types';
 import { jiraApi, widgetsApi, type JiraIssue, type JiraSprint, type JiraEpic } from '../services/api';
 
@@ -107,7 +107,7 @@ export default function JiraView({ connection, viewType, goalId, onWidgetAdded }
         content = `Project Timeline - ${sprint?.name || 'Current Sprint'}`;
 
         // Prepare Gantt data from actual Jira issues
-        const ganttTasks = [];
+        const ganttTasks: Array<{id: string | number; key: string; name: string; type: string; status: string; startDay: number; duration: number}> = [];
 
         // Add epics
         epics.slice(0, 5).forEach((epic, idx) => {

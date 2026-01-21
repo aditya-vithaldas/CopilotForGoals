@@ -35,6 +35,7 @@ export interface ConnectionConfig {
   projectKey?: string;
   boardId?: string;
   boardName?: string;
+  boardType?: 'scrum' | 'kanban';
   email?: string;
   apiToken?: string;
 

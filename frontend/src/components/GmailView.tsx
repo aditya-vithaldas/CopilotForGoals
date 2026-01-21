@@ -11,15 +11,6 @@ interface GmailViewProps {
   onWidgetAdded?: () => void;
 }
 
-const labelColors: Record<string, string> = {
-  'INBOX': 'bg-blue-100 text-blue-700',
-  'STARRED': 'bg-yellow-100 text-yellow-700',
-  'IMPORTANT': 'bg-red-100 text-red-700',
-  'SENT': 'bg-green-100 text-green-700',
-  'DRAFT': 'bg-gray-100 text-gray-700',
-  'UNREAD': 'bg-indigo-100 text-indigo-700',
-};
-
 type DashboardWidgetType = 'inbox_summary' | 'unread_count' | 'recent_emails' | 'label_emails';
 
 export default function GmailView({ connection, viewType, goalId, onWidgetAdded }: GmailViewProps) {
@@ -29,9 +20,9 @@ export default function GmailView({ connection, viewType, goalId, onWidgetAdded 
   const [emails, setEmails] = useState<GmailEmail[]>([]);
   const [labels, setLabels] = useState<GmailLabel[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<GmailEmail | null>(null);
-  const [loadingEmail, setLoadingEmail] = useState(false);
+  const [_loadingEmail, setLoadingEmail] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
+  const [_isSearching, setIsSearching] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string>('');
   const [addingWidget, setAddingWidget] = useState<string | null>(null);
   const [addedWidgets, setAddedWidgets] = useState<Set<string>>(new Set());
@@ -153,17 +144,152 @@ export default function GmailView({ connection, viewType, goalId, onWidgetAdded 
       let title = '';
       let content = '';
 
+      // Interface for action items stored in widget config
+      interface ActionItem {
+        id: string;
+        action: string;
+        from: string;
+        date: string;
+        status: 'pending' | 'done' | 'deleted';
+      }
+
       if (widgetType === 'inbox_summary') {
-        title = `Gmail Inbox - ${connection.name}`;
-        const unreadCount = emails.filter(e => e.labelIds?.includes('UNREAD')).length;
-        content = `## Inbox Summary\n\n`;
-        content += `- **Total Emails:** ${emails.length}\n`;
-        content += `- **Unread:** ${unreadCount}\n\n`;
-        content += `### Recent Messages\n\n`;
-        emails.slice(0, 5).forEach(email => {
+        title = `Inbox Action Items - ${connection.name}`;
+
+        // Fetch full content of top 5 emails
+        const top5Emails = emails.slice(0, 5);
+        const fullEmails = await Promise.all(
+          top5Emails.map(email => gmailApi.getEmail(connection.id, email.id))
+        );
+
+        // Extract OBJECTIVE-focused action items (not tactical/mechanical actions)
+        // Patterns that capture meaningful goals/objectives with deadlines or requirements
+        const objectivePatterns = [
+          // Deadline-based objectives: "pay your bill by X", "complete registration by X"
+          /(?:pay|complete|submit|finalize|finish|renew)\s+(?:your\s+)?([^.!?\n]+?)(?:\s+by\s+[^.!?\n]+)?[.!?]?/gi,
+          // Authentication/verification: "verify your account", "authenticate at X"
+          /(?:verify|authenticate|confirm|validate|activate)\s+(?:your\s+)?(?:account|email|identity|registration)[^.!?\n]*/gi,
+          // Registration/signup: "complete your registration at X"
+          /(?:complete|finish)\s+(?:your\s+)?(?:registration|signup|onboarding|setup)[^.!?\n]*/gi,
+          // Payment/billing: "payment due", "invoice requires payment"
+          /(?:payment|invoice|bill|subscription)[^.!?\n]*(?:due|expires?|requires?)[^.!?\n]*/gi,
+          // Approval/sign-off: "approval needed for X", "sign off on X"
+          /(?:approval|sign[- ]?off|authorization)\s+(?:needed|required|requested)\s+(?:for|on)\s+([^.!?\n]+)/gi,
+          // Meeting/call scheduling: "schedule meeting with X", "call with X"
+          /(?:schedule|book|arrange)\s+(?:a\s+)?(?:meeting|call|demo|session)\s+(?:with|for)\s+([^.!?\n]+)/gi,
+          // Contract/agreement: "sign the contract", "agreement expires"
+          /(?:sign|review|approve)\s+(?:the\s+)?(?:contract|agreement|NDA|proposal)\s*(?:for|with|from)?\s*([^.!?\n]*)/gi,
+          // Subscription/renewal: "subscription expires", "renew your X"
+          /(?:subscription|membership|license|trial)\s+(?:expires?|ending|renew)[^.!?\n]*/gi,
+          // Access/permission: "grant access to X", "access request for X"
+          /(?:grant|request|approve)\s+(?:access|permission)\s+(?:to|for)\s+([^.!?\n]+)/gi,
+        ];
+
+        // Words that indicate generic/tactical items to filter out
+        const genericPhrases = [
+          'click here', 'click below', 'click the link', 'click this',
+          'see attached', 'see below', 'see the', 'find attached',
+          'let me know', 'let us know', 'get back to',
+          'read more', 'learn more', 'view details',
+          'unsubscribe', 'opt out', 'privacy policy',
+          'contact us', 'reach out', 'reply to this',
+          'forward this', 'share this',
+        ];
+
+        const rawActionItems: { from: string; action: string; date: string }[] = [];
+
+        fullEmails.forEach(email => {
           const from = email.from.split('<')[0].trim();
-          content += `- **${from}**: ${email.subject || '(no subject)'}\n`;
+          const bodyText = email.textBody || email.htmlBody?.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') || '';
+          const date = new Date(email.date).toLocaleDateString();
+          const subject = email.subject || '';
+
+          // Extract objectives using patterns
+          objectivePatterns.forEach(pattern => {
+            const matches = bodyText.matchAll(pattern);
+            for (const match of matches) {
+              let action = match[0].trim();
+              // Clean up the action text
+              action = action.replace(/^\s*[-•]\s*/, '').trim();
+              // Filter out generic/tactical phrases
+              const isGeneric = genericPhrases.some(phrase =>
+                action.toLowerCase().includes(phrase)
+              );
+              if (!isGeneric && action.length > 15 && action.length < 150) {
+                // Capitalize first letter and format as objective
+                action = action.charAt(0).toUpperCase() + action.slice(1);
+                rawActionItems.push({ from, action, date });
+              }
+            }
+          });
+
+          // Check subject line for objective keywords
+          const subjectLower = subject.toLowerCase();
+          const objectiveKeywords = [
+            'payment', 'invoice', 'due', 'expires', 'deadline', 'renewal',
+            'verification', 'authenticate', 'confirm', 'approval', 'required',
+            'registration', 'complete your', 'action required', 'urgent'
+          ];
+
+          if (objectiveKeywords.some(kw => subjectLower.includes(kw))) {
+            // Extract the objective from subject directly (no "Review:" prefix)
+            let objectiveAction = subject;
+            // Clean common prefixes
+            objectiveAction = objectiveAction.replace(/^(re:|fwd:|fw:)\s*/gi, '').trim();
+            if (objectiveAction.length > 10) {
+              rawActionItems.push({
+                from,
+                action: objectiveAction,
+                date
+              });
+            }
+          }
         });
+
+        // Deduplicate and limit, then format as ActionItems with IDs
+        const uniqueActions = rawActionItems
+          .filter((item, idx, arr) =>
+            arr.findIndex(i => i.action.toLowerCase() === item.action.toLowerCase()) === idx
+          )
+          .slice(0, 10);
+
+        const actionItems: ActionItem[] = uniqueActions.map((item, idx) => ({
+          id: `action-${Date.now()}-${idx}`,
+          action: item.action,
+          from: item.from,
+          date: item.date,
+          status: 'pending' as const
+        }));
+
+        // If no action items found, create review items from email subjects
+        if (actionItems.length === 0) {
+          fullEmails.forEach((email, idx) => {
+            const from = email.from.split('<')[0].trim();
+            const date = new Date(email.date).toLocaleDateString();
+            actionItems.push({
+              id: `action-${Date.now()}-${idx}`,
+              action: `Review: ${email.subject || 'No subject'}`,
+              from,
+              date,
+              status: 'pending'
+            });
+          });
+        }
+
+        // Build simple content for display (ActionItemsView will be used for rendering)
+        content = `${actionItems.length} action items from ${fullEmails.length} emails`;
+
+        // Store action items in config for the special renderer
+        await widgetsApi.create(goalId, {
+          widget_type: widgetType,
+          title,
+          content,
+          config: { connectionId: connection.id, actionItems }
+        });
+
+        setAddedWidgets(prev => new Set([...prev, widgetKey]));
+        onWidgetAdded?.();
+        return; // Early return since we already created the widget
       } else if (widgetType === 'unread_count') {
         title = `Unread Emails - ${connection.name}`;
         const unreadCount = emails.filter(e => e.labelIds?.includes('UNREAD')).length;
@@ -190,85 +316,111 @@ export default function GmailView({ connection, viewType, goalId, onWidgetAdded 
           top5Emails.map(email => gmailApi.getEmail(connection.id, email.id))
         );
 
-        // Extract action items from emails
-        const actionItemPatterns = [
-          /please\s+(?:can you\s+)?([^.!?\n]+[.!?]?)/gi,
-          /could you\s+([^.!?\n]+[.!?]?)/gi,
-          /need(?:s)?\s+(?:to|you to)\s+([^.!?\n]+[.!?]?)/gi,
-          /action\s*(?:item|required)?:?\s*([^.!?\n]+[.!?]?)/gi,
-          /todo:?\s*([^.!?\n]+[.!?]?)/gi,
-          /deadline:?\s*([^.!?\n]+[.!?]?)/gi,
-          /by\s+(?:end of day|eod|monday|tuesday|wednesday|thursday|friday|tomorrow|next week)([^.!?\n]*[.!?]?)/gi,
-          /urgent:?\s*([^.!?\n]+[.!?]?)/gi,
-          /asap\s*([^.!?\n]+[.!?]?)/gi,
-          /follow[- ]?up:?\s*([^.!?\n]+[.!?]?)/gi,
-          /reminder:?\s*([^.!?\n]+[.!?]?)/gi,
-          /schedule\s+(?:a\s+)?([^.!?\n]+[.!?]?)/gi,
-          /send\s+(?:me\s+)?(?:the\s+)?([^.!?\n]+[.!?]?)/gi,
-          /review\s+(?:the\s+)?([^.!?\n]+[.!?]?)/gi,
-          /confirm\s+([^.!?\n]+[.!?]?)/gi,
+        // Extract OBJECTIVE-focused action items (not tactical/mechanical actions)
+        const objectivePatterns = [
+          /(?:pay|complete|submit|finalize|finish|renew)\s+(?:your\s+)?([^.!?\n]+?)(?:\s+by\s+[^.!?\n]+)?[.!?]?/gi,
+          /(?:verify|authenticate|confirm|validate|activate)\s+(?:your\s+)?(?:account|email|identity|registration)[^.!?\n]*/gi,
+          /(?:complete|finish)\s+(?:your\s+)?(?:registration|signup|onboarding|setup)[^.!?\n]*/gi,
+          /(?:payment|invoice|bill|subscription)[^.!?\n]*(?:due|expires?|requires?)[^.!?\n]*/gi,
+          /(?:approval|sign[- ]?off|authorization)\s+(?:needed|required|requested)\s+(?:for|on)\s+([^.!?\n]+)/gi,
+          /(?:schedule|book|arrange)\s+(?:a\s+)?(?:meeting|call|demo|session)\s+(?:with|for)\s+([^.!?\n]+)/gi,
+          /(?:sign|review|approve)\s+(?:the\s+)?(?:contract|agreement|NDA|proposal)\s*(?:for|with|from)?\s*([^.!?\n]*)/gi,
+          /(?:subscription|membership|license|trial)\s+(?:expires?|ending|renew)[^.!?\n]*/gi,
+          /(?:grant|request|approve)\s+(?:access|permission)\s+(?:to|for)\s+([^.!?\n]+)/gi,
         ];
 
-        const actionItems: { from: string; subject: string; action: string; date: string }[] = [];
+        const genericPhrases = [
+          'click here', 'click below', 'click the link', 'click this',
+          'see attached', 'see below', 'see the', 'find attached',
+          'let me know', 'let us know', 'get back to',
+          'read more', 'learn more', 'view details',
+          'unsubscribe', 'opt out', 'privacy policy',
+          'contact us', 'reach out', 'reply to this',
+          'forward this', 'share this',
+        ];
+
+        const rawActionItems: { from: string; action: string; date: string }[] = [];
 
         fullEmails.forEach(email => {
           const from = email.from.split('<')[0].trim();
           const bodyText = email.textBody || email.htmlBody?.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') || '';
           const date = new Date(email.date).toLocaleDateString();
+          const subject = email.subject || '';
 
-          // Extract action items using patterns
-          actionItemPatterns.forEach(pattern => {
+          objectivePatterns.forEach(pattern => {
             const matches = bodyText.matchAll(pattern);
             for (const match of matches) {
-              const action = match[0].trim();
-              if (action.length > 10 && action.length < 200) {
-                actionItems.push({ from, subject: email.subject || 'No subject', action, date });
+              let action = match[0].trim();
+              action = action.replace(/^\s*[-•]\s*/, '').trim();
+              const isGeneric = genericPhrases.some(phrase =>
+                action.toLowerCase().includes(phrase)
+              );
+              if (!isGeneric && action.length > 15 && action.length < 150) {
+                action = action.charAt(0).toUpperCase() + action.slice(1);
+                rawActionItems.push({ from, action, date });
               }
             }
           });
 
-          // Also check subject for action keywords
-          const subjectLower = (email.subject || '').toLowerCase();
-          if (subjectLower.includes('action') || subjectLower.includes('urgent') ||
-              subjectLower.includes('required') || subjectLower.includes('deadline') ||
-              subjectLower.includes('reminder') || subjectLower.includes('follow up')) {
-            actionItems.push({
-              from,
-              subject: email.subject || 'No subject',
-              action: `Review: ${email.subject}`,
-              date
-            });
+          const subjectLower = subject.toLowerCase();
+          const objectiveKeywords = [
+            'payment', 'invoice', 'due', 'expires', 'deadline', 'renewal',
+            'verification', 'authenticate', 'confirm', 'approval', 'required',
+            'registration', 'complete your', 'action required', 'urgent'
+          ];
+
+          if (objectiveKeywords.some(kw => subjectLower.includes(kw))) {
+            let objectiveAction = subject.replace(/^(re:|fwd:|fw:)\s*/gi, '').trim();
+            if (objectiveAction.length > 10) {
+              rawActionItems.push({ from, action: objectiveAction, date });
+            }
           }
         });
 
-        // Build the widget content
-        content = `## Action Items from "${labelName}"\n\n`;
-        content += `*Extracted from ${fullEmails.length} most recent emails*\n\n`;
+        // Deduplicate and limit, then format as ActionItems with IDs
+        const uniqueActions = rawActionItems
+          .filter((item, idx, arr) =>
+            arr.findIndex(i => i.action.toLowerCase() === item.action.toLowerCase()) === idx
+          )
+          .slice(0, 10);
 
-        if (actionItems.length > 0) {
-          // Deduplicate and limit
-          const uniqueActions = actionItems
-            .filter((item, idx, arr) =>
-              arr.findIndex(i => i.action.toLowerCase() === item.action.toLowerCase()) === idx
-            )
-            .slice(0, 10);
+        const actionItems: ActionItem[] = uniqueActions.map((item, idx) => ({
+          id: `action-${Date.now()}-${idx}`,
+          action: item.action,
+          from: item.from,
+          date: item.date,
+          status: 'pending' as const
+        }));
 
-          uniqueActions.forEach((item, idx) => {
-            content += `${idx + 1}. **${item.action}**\n`;
-            content += `   - *From:* ${item.from} (${item.date})\n`;
-            content += `   - *Re:* ${item.subject}\n\n`;
-          });
-
-          content += `---\n*${actionItems.length} action items found across ${fullEmails.length} emails*`;
-        } else {
-          // Fallback: show email subjects as potential items to review
-          content += `No explicit action items detected. Recent emails to review:\n\n`;
+        // If no action items found, create review items from email subjects
+        if (actionItems.length === 0) {
           fullEmails.forEach((email, idx) => {
             const from = email.from.split('<')[0].trim();
             const date = new Date(email.date).toLocaleDateString();
-            content += `${idx + 1}. **${email.subject || 'No subject'}** - ${from} (${date})\n`;
+            actionItems.push({
+              id: `action-${Date.now()}-${idx}`,
+              action: `Review: ${email.subject || 'No subject'}`,
+              from,
+              date,
+              status: 'pending'
+            });
           });
         }
+
+        // Build simple content for display
+        content = `${actionItems.length} action items from ${fullEmails.length} emails`;
+
+        // Store action items in config for the special renderer
+        await widgetsApi.create(goalId, {
+          widget_type: widgetType,
+          title,
+          content,
+          config: { connectionId: connection.id, labelName, actionItems }
+        });
+
+        setAddedWidgets(prev => new Set([...prev, widgetKey]));
+        onWidgetAdded?.();
+        return; // Early return since we already created the widget
       }
 
       await widgetsApi.create(goalId, {
@@ -491,7 +643,7 @@ export default function GmailView({ connection, viewType, goalId, onWidgetAdded 
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm text-gray-500">Add to Dashboard:</span>
-          <AddToDashboardButton type="inbox_summary" label="Inbox Summary" />
+          <AddToDashboardButton type="inbox_summary" label="Action Items (Last 5)" />
           <AddToDashboardButton type="unread_count" label="Unread Count" />
           <AddToDashboardButton type="recent_emails" label="Recent Emails" />
         </div>

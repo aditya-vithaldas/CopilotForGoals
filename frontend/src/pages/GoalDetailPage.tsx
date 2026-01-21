@@ -17,6 +17,7 @@ import {
   Pencil,
   Check,
   X,
+  MessageCircle,
 } from 'lucide-react';
 import { goalsApi, connectionsApi, filesApi, driveApi, chatApi, widgetsApi, type DriveFile, type Widget } from '../services/api';
 import type { Goal, Connection, ConnectionType, Suggestion } from '../types';
@@ -42,6 +43,7 @@ const connectionIcons: Record<ConnectionType, React.ReactNode> = {
   jira: <LayoutGrid className="w-4 h-4" />,
   mysql: <Database className="w-4 h-4" />,
   confluence: <BookOpen className="w-4 h-4" />,
+  whatsapp: <MessageCircle className="w-4 h-4" />,
 };
 
 const connectionLabels: Record<ConnectionType, string> = {
@@ -51,6 +53,7 @@ const connectionLabels: Record<ConnectionType, string> = {
   jira: 'Jira',
   mysql: 'MySQL Database',
   confluence: 'Confluence Wiki',
+  whatsapp: 'WhatsApp',
 };
 
 type ActionResult = {
@@ -218,7 +221,6 @@ export default function GoalDetailPage() {
 
   const handleSuggestionAction = async (suggestion: Suggestion) => {
     const connection = goal?.connections?.find(c => c.id === suggestion.connection_id);
-    const file = goal?.files?.find(f => f.id === suggestion.file_id);
 
     // Handle file-based actions (summarize, extract_points)
     if (suggestion.action_type === 'summarize' && suggestion.file_id) {
@@ -541,13 +543,13 @@ export default function GoalDetailPage() {
           {/* Activity Status Banner */}
           <ActivityStatusBanner />
 
-          {/* Dashboard Widgets */}
-          {widgets.length > 0 && (
-            <DashboardWidgets widgets={widgets} onRefresh={loadWidgets} />
-          )}
-
-          {/* Sample Widgets - Showcase */}
+          {/* Sample Widgets - Customer Feedback & Data (shown first) */}
           <SampleWidgets />
+
+          {/* Dashboard Widgets */}
+          {widgets.length > 0 && id && (
+            <DashboardWidgets widgets={widgets} goalId={id} onRefresh={loadWidgets} />
+          )}
 
           {/* Quick Actions */}
           <div className="bg-white rounded-xl border border-gray-200 p-6">

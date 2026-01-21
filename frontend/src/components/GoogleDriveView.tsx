@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Search, FileText, FolderOpen, Image, File, Video, Grid, List, Download, Loader2, ChevronRight, ArrowLeft } from 'lucide-react';
+import { Search, FileText, FolderOpen, Image, File, Video, Grid, List, Loader2, ChevronRight, ArrowLeft } from 'lucide-react';
 import type { Connection } from '../types';
 import { driveApi, type DriveFile } from '../services/api';
 

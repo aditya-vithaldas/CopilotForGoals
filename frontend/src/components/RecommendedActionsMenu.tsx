@@ -118,7 +118,7 @@ const getPriorityDot = (priority: string) => {
 export default function RecommendedActionsMenu() {
   const [isOpen, setIsOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  const [actions, setActions] = useState<RecommendedAction[]>(sampleActions);
+  const [actions, _setActions] = useState<RecommendedAction[]>(sampleActions);
   const [acceptedActions, setAcceptedActions] = useState<Set<string>>(new Set());
   const [rejectedActions, setRejectedActions] = useState<Set<string>>(new Set());
 

@@ -1,11 +1,11 @@
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/copilot-for-goals:$COMMIT_SHA', '.']
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/copilotforgoals:$COMMIT_SHA', '.']
 
   # Push the container image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/copilot-for-goals:$COMMIT_SHA']
+    args: ['push', 'gcr.io/$PROJECT_ID/copilotforgoals:$COMMIT_SHA']
 
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -13,9 +13,9 @@ steps:
     args:
       - 'run'
       - 'deploy'
-      - 'copilot-for-goals'
+      - 'copilotforgoals'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/copilot-for-goals:$COMMIT_SHA'
+      - 'gcr.io/$PROJECT_ID/copilotforgoals:$COMMIT_SHA'
       - '--region'
       - '${_REGION}'
       - '--platform'
@@ -25,10 +25,10 @@ steps:
       - 'NODE_ENV=production,GEMINI_API_KEY=${_GEMINI_API_KEY},GOOGLE_CLIENT_ID=${_GOOGLE_CLIENT_ID},GOOGLE_CLIENT_SECRET=${_GOOGLE_CLIENT_SECRET}'
 
 images:
-  - 'gcr.io/$PROJECT_ID/copilot-for-goals:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/copilotforgoals:$COMMIT_SHA'
 
 substitutions:
-  _REGION: us-central1
+  _REGION: europe-west1
   _GEMINI_API_KEY: ''
   _GOOGLE_CLIENT_ID: ''
   _GOOGLE_CLIENT_SECRET: ''

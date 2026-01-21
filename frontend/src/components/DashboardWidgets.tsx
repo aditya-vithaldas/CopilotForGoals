@@ -1,7 +1,231 @@
-import { useState } from 'react';
-import { RefreshCw, Trash2, FileText, List, Loader2, ChevronDown, ChevronUp, LayoutGrid, Calendar, Clock, GanttChart, Search, GripVertical, Mail } from 'lucide-react';
-import { widgetsApi, type Widget } from '../services/api';
+import React, { useState } from 'react';
+import { RefreshCw, Trash2, FileText, List, Loader2, ChevronDown, ChevronUp, LayoutGrid, Calendar, Clock, GanttChart, Search, GripVertical, Mail, Check, X, PlusCircle, CheckCircle2 } from 'lucide-react';
+import { widgetsApi, todosApi, type Widget } from '../services/api';
 import ReactMarkdown from 'react-markdown';
+
+// Action Item interface
+interface ActionItem {
+  id: string;
+  action: string;
+  from: string;
+  date: string;
+  status: 'pending' | 'done' | 'deleted';
+}
+
+// Action Items Table View Component
+interface ActionItemsViewProps {
+  actionItems: ActionItem[];
+  widgetId: string;
+  onUpdate: (items: ActionItem[]) => void;
+}
+
+const ActionItemsView = ({ actionItems, widgetId, onUpdate }: ActionItemsViewProps) => {
+  const [items, setItems] = useState<ActionItem[]>(actionItems);
+
+  const handleStatusChange = async (itemId: string, newStatus: 'done' | 'deleted') => {
+    const updatedItems = items.map(item =>
+      item.id === itemId ? { ...item, status: newStatus } : item
+    );
+    setItems(updatedItems);
+
+    // Update the widget config with new action items
+    try {
+      await widgetsApi.update(widgetId, {
+        config: { actionItems: updatedItems }
+      });
+      onUpdate(updatedItems);
+    } catch (error) {
+      console.error('Failed to update action item status:', error);
+      // Revert on error
+      setItems(items);
+    }
+  };
+
+  const visibleItems = items.filter(item => item.status !== 'deleted');
+
+  if (visibleItems.length === 0) {
+    return (
+      <div className="text-center py-6 text-gray-500">
+        <Check className="w-8 h-8 mx-auto mb-2 text-green-500" />
+        <p className="text-sm">All action items completed!</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-gray-200 bg-gray-50">
+            <th className="px-3 py-2 text-left font-medium text-gray-600 w-10">Status</th>
+            <th className="px-3 py-2 text-left font-medium text-gray-600">Action Item</th>
+            <th className="px-3 py-2 text-left font-medium text-gray-600 w-32">From</th>
+            <th className="px-3 py-2 text-right font-medium text-gray-600 w-20">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleItems.map((item) => (
+            <tr
+              key={item.id}
+              className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${
+                item.status === 'done' ? 'bg-green-50/50' : ''
+              }`}
+            >
+              <td className="px-3 py-2.5">
+                <div className={`w-5 h-5 rounded-full flex items-center justify-center ${
+                  item.status === 'done'
+                    ? 'bg-green-500 text-white'
+                    : 'border-2 border-gray-300'
+                }`}>
+                  {item.status === 'done' && <Check size={12} />}
+                </div>
+              </td>
+              <td className="px-3 py-2.5">
+                <span className={`${item.status === 'done' ? 'line-through text-gray-400' : 'text-gray-800'}`}>
+                  {item.action}
+                </span>
+                <span className="text-xs text-gray-400 ml-2">({item.date})</span>
+              </td>
+              <td className="px-3 py-2.5 text-gray-600 truncate max-w-[120px]" title={item.from}>
+                {item.from}
+              </td>
+              <td className="px-3 py-2.5">
+                <div className="flex items-center justify-end gap-1">
+                  {item.status !== 'done' && (
+                    <button
+                      onClick={() => handleStatusChange(item.id, 'done')}
+                      className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors"
+                      title="Mark as done"
+                    >
+                      <Check size={14} />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleStatusChange(item.id, 'deleted')}
+                    className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                    title="Delete"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="px-3 py-2 text-xs text-gray-400 border-t border-gray-100">
+        {visibleItems.filter(i => i.status === 'done').length} of {visibleItems.length} completed
+      </div>
+    </div>
+  );
+};
+
+// Summary Content View with Action Item Add Buttons
+interface SummaryContentViewProps {
+  content: string;
+  goalId: string;
+  widgetTitle: string;
+  onTodoAdded?: () => void;
+}
+
+const SummaryContentView = ({ content, goalId, widgetTitle, onTodoAdded }: SummaryContentViewProps) => {
+  const [addingItem, setAddingItem] = useState<string | null>(null);
+  const [addedItems, setAddedItems] = useState<Set<string>>(new Set());
+
+  const handleAddTodo = async (actionText: string) => {
+    setAddingItem(actionText);
+    try {
+      await todosApi.create(goalId, actionText, widgetTitle);
+      setAddedItems(prev => new Set(prev).add(actionText));
+      onTodoAdded?.();
+    } catch (error) {
+      console.error('Failed to add todo:', error);
+    } finally {
+      setAddingItem(null);
+    }
+  };
+
+  // Parse content to identify action items section
+  const lines = content.split('\n');
+  let inActionItems = false;
+  const elements: React.ReactElement[] = [];
+  let currentSection: string[] = [];
+
+  const flushSection = (key: string) => {
+    if (currentSection.length > 0) {
+      elements.push(
+        <div key={key} className="prose prose-sm max-w-none text-gray-700">
+          <ReactMarkdown>{currentSection.join('\n')}</ReactMarkdown>
+        </div>
+      );
+      currentSection = [];
+    }
+  };
+
+  lines.forEach((line, idx) => {
+    const trimmedLine = line.trim();
+
+    // Check if entering action items section
+    if (trimmedLine.toLowerCase().includes('action item')) {
+      flushSection(`section-${idx}`);
+      inActionItems = true;
+      elements.push(
+        <div key={`header-${idx}`} className="font-semibold text-gray-800 mt-3 mb-1">
+          {trimmedLine.replace(/\*\*/g, '')}
+        </div>
+      );
+      return;
+    }
+
+    // Check if leaving action items (new section header)
+    if (inActionItems && trimmedLine.startsWith('**') && !trimmedLine.toLowerCase().includes('action')) {
+      inActionItems = false;
+    }
+
+    // If in action items section and line is a bullet point
+    if (inActionItems && (trimmedLine.startsWith('•') || trimmedLine.startsWith('-') || trimmedLine.startsWith('*'))) {
+      const actionText = trimmedLine.replace(/^[•\-*]\s*/, '').replace(/\*\*/g, '');
+      if (actionText) {
+        const isAdded = addedItems.has(actionText);
+        const isAdding = addingItem === actionText;
+        elements.push(
+          <div key={`action-${idx}`} className="flex items-center gap-2 py-1">
+            <span className="text-gray-400">•</span>
+            <span className="flex-1 text-sm text-gray-700">{actionText}</span>
+            <button
+              onClick={() => handleAddTodo(actionText)}
+              disabled={isAdding || isAdded}
+              className={`flex-shrink-0 rounded-full transition-all ${
+                isAdded
+                  ? 'text-green-500'
+                  : isAdding
+                    ? 'text-gray-400'
+                    : 'text-indigo-500 hover:text-indigo-600'
+              }`}
+              title={isAdded ? 'Added to todos' : 'Add to todos'}
+            >
+              {isAdding ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : isAdded ? (
+                <CheckCircle2 size={16} />
+              ) : (
+                <PlusCircle size={16} />
+              )}
+            </button>
+          </div>
+        );
+        return;
+      }
+    }
+
+    currentSection.push(line);
+  });
+
+  flushSection('final-section');
+
+  return <div className="space-y-1">{elements}</div>;
+};
+
 import {
   DndContext,
   closestCenter,
@@ -9,8 +233,8 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
-  DragEndEvent,
 } from '@dnd-kit/core';
+import type { DragEndEvent } from '@dnd-kit/core';
 import {
   arrayMove,
   SortableContext,
@@ -157,14 +381,17 @@ const GanttChartView = ({ tasks, sprintName }: GanttChartViewProps) => {
 // Sortable Widget Item Component
 interface SortableWidgetProps {
   widget: Widget;
+  goalId: string;
   isExpanded: boolean;
   refreshing: string | null;
   onRefresh: (widget: Widget) => void;
   onDelete: (widget: Widget) => void;
   onToggleExpand: (widgetId: string) => void;
+  onActionItemsUpdate: (widgetId: string, items: ActionItem[]) => void;
+  onTodoAdded?: () => void;
 }
 
-function SortableWidget({ widget, isExpanded, refreshing, onRefresh, onDelete, onToggleExpand }: SortableWidgetProps) {
+function SortableWidget({ widget, goalId, isExpanded, refreshing, onRefresh, onDelete, onToggleExpand, onActionItemsUpdate, onTodoAdded }: SortableWidgetProps) {
   const {
     attributes,
     listeners,
@@ -270,11 +497,24 @@ function SortableWidget({ widget, isExpanded, refreshing, onRefresh, onDelete, o
 
       {/* Widget Content */}
       {isExpanded && (
-        <div className={`p-4 ${widget.widget_type === 'gantt_chart' ? 'max-h-96' : 'max-h-64'} overflow-y-auto`}>
+        <div className={`p-4 ${widget.widget_type === 'gantt_chart' ? 'max-h-96' : 'max-h-80'} overflow-y-auto`}>
           {widget.widget_type === 'gantt_chart' ? (
             <GanttChartView
-              tasks={widget.config?.ganttTasks}
-              sprintName={widget.config?.sprintName}
+              tasks={widget.config?.ganttTasks as GanttTask[] | undefined}
+              sprintName={widget.config?.sprintName as string | undefined}
+            />
+          ) : (widget.widget_type === 'inbox_summary' || widget.widget_type === 'label_emails') && widget.config?.actionItems ? (
+            <ActionItemsView
+              actionItems={widget.config.actionItems as ActionItem[]}
+              widgetId={widget.id}
+              onUpdate={(items) => onActionItemsUpdate(widget.id, items)}
+            />
+          ) : (widget.widget_type === 'summary' || widget.widget_type === 'key_points') ? (
+            <SummaryContentView
+              content={widget.content}
+              goalId={goalId}
+              widgetTitle={widget.title}
+              onTodoAdded={onTodoAdded}
             />
           ) : (
             <div className="prose prose-sm max-w-none text-gray-700">
@@ -289,17 +529,19 @@ function SortableWidget({ widget, isExpanded, refreshing, onRefresh, onDelete, o
 
 interface DashboardWidgetsProps {
   widgets: Widget[];
-  onRefresh: () => void;
+  goalId: string;
+  onRefresh: () => void | Promise<void>;
+  onTodoAdded?: () => void;
 }
 
-export default function DashboardWidgets({ widgets, onRefresh }: DashboardWidgetsProps) {
+export default function DashboardWidgets({ widgets, goalId, onRefresh, onTodoAdded }: DashboardWidgetsProps) {
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [orderedWidgets, setOrderedWidgets] = useState<Widget[]>(widgets);
 
   // Update ordered widgets when props change
   if (widgets.length !== orderedWidgets.length ||
-      widgets.some((w, i) => !orderedWidgets.find(ow => ow.id === w.id))) {
+      widgets.some((w) => !orderedWidgets.find(ow => ow.id === w.id))) {
     setOrderedWidgets(widgets);
   }
 
@@ -339,7 +581,7 @@ export default function DashboardWidgets({ widgets, onRefresh }: DashboardWidget
     setRefreshing(widget.id);
     try {
       await widgetsApi.refresh(widget.id);
-      onRefresh();
+      await onRefresh(); // Wait for parent to reload widgets before clearing spinner
     } catch (error) {
       console.error('Failed to refresh widget:', error);
     } finally {
@@ -361,14 +603,17 @@ export default function DashboardWidgets({ widgets, onRefresh }: DashboardWidget
     setExpanded(prev => ({ ...prev, [widgetId]: !prev[widgetId] }));
   };
 
+  const handleActionItemsUpdate = (widgetId: string, items: ActionItem[]) => {
+    // Update the local widget state with new action items
+    setOrderedWidgets(prev => prev.map(w =>
+      w.id === widgetId ? { ...w, config: { ...w.config, actionItems: items } } : w
+    ));
+  };
+
   if (widgets.length === 0) return null;
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-gray-900">Dashboard</h2>
-        <p className="text-xs text-gray-400">Drag widgets to reorder</p>
-      </div>
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -380,11 +625,14 @@ export default function DashboardWidgets({ widgets, onRefresh }: DashboardWidget
               <SortableWidget
                 key={widget.id}
                 widget={widget}
+                goalId={goalId}
                 isExpanded={expanded[widget.id] !== false}
                 refreshing={refreshing}
                 onRefresh={handleRefresh}
                 onDelete={handleDelete}
                 onToggleExpand={toggleExpanded}
+                onActionItemsUpdate={handleActionItemsUpdate}
+                onTodoAdded={onTodoAdded}
               />
             ))}
           </div>

@@ -21,7 +21,7 @@ export default function ChatButton({ goal }: ChatButtonProps) {
   const [loading, setLoading] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [apiKey, setApiKey] = useState('');
-  const [apiKeySet, setApiKeySet] = useState(false);
+  const [_apiKeySet, setApiKeySet] = useState(false);
   const [apiKeySaving, setApiKeySaving] = useState(false);
 
   const hasConnections = goal.connections && goal.connections.length > 0;

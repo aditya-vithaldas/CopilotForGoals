@@ -37,10 +37,23 @@ const oauth2Client = new google.auth.OAuth2(
 /**
  * Generate OAuth authorization URL
  * @param {Object} state - State object to pass through OAuth flow (e.g., { goalId, connectionType })
+ * @param {string} customRedirectUri - Optional custom redirect URI
  * @returns {string} Authorization URL
  */
-function getAuthUrl(state) {
+function getAuthUrl(state, customRedirectUri = null) {
   const stateString = typeof state === 'string' ? state : JSON.stringify(state);
+
+  if (customRedirectUri) {
+    // Create a new client with custom redirect URI
+    const customClient = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, customRedirectUri);
+    return customClient.generateAuthUrl({
+      access_type: 'offline',
+      scope: SCOPES,
+      state: stateString,
+      prompt: 'consent',
+    });
+  }
+
   return oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
@@ -52,9 +65,15 @@ function getAuthUrl(state) {
 /**
  * Exchange authorization code for tokens
  * @param {string} code - Authorization code from OAuth callback
+ * @param {string} customRedirectUri - Optional custom redirect URI (must match the one used in getAuthUrl)
  * @returns {Promise<Object>} Token object with access_token, refresh_token, expiry_date
  */
-async function getTokens(code) {
+async function getTokens(code, customRedirectUri = null) {
+  if (customRedirectUri) {
+    const customClient = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, customRedirectUri);
+    const { tokens } = await customClient.getToken(code);
+    return tokens;
+  }
   const { tokens } = await oauth2Client.getToken(code);
   return tokens;
 }

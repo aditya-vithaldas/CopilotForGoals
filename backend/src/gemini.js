@@ -68,7 +68,21 @@ async function summarizeContent(content, type = 'document') {
   }
 
   const prompt = type === 'document'
-    ? `Summarize the following document concisely, highlighting key points and action items:\n\n${content}`
+    ? `Summarize the following document very briefly. Format your response as:
+
+**Key Points:**
+• [one short bullet point]
+• [one short bullet point]
+
+**Action Items:**
+• [short action item]
+• [short action item]
+• [short action item]
+
+Keep each bullet point under 10 words. Be extremely concise.
+
+Document:
+${content}`
     : `Analyze the following data and provide insights:\n\n${content}`;
 
   try {
